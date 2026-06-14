@@ -1,62 +1,315 @@
 // Package jsonplaceholder is the library behind the jsonplaceholder command line:
-// the HTTP client, request shaping, and the typed data models for jsonplaceholder.
+// the HTTP client, request shaping, and the typed data models for the
+// JSONPlaceholder fake REST API at https://jsonplaceholder.typicode.com.
 //
-// The Client here is the spine every command shares. It sets a real
-// User-Agent, paces requests so a busy session stays polite, and retries the
-// transient failures (429 and 5xx) that any public site throws under load.
-// Build your endpoint calls and JSON decoding on top of it.
+// The API is public and requires no key. It provides fake posts, comments,
+// users, todos, albums, and photos for testing and prototyping.
 package jsonplaceholder
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
+	"net/url"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
-// DefaultUserAgent identifies the client to jsonplaceholder. A real, honest
-// User-Agent is both polite and the thing most likely to keep you unblocked.
-const DefaultUserAgent = "jsonplaceholder/dev (+https://github.com/tamnd/jsonplaceholder-cli)"
+// Host is the JSONPlaceholder API hostname.
+const Host = "jsonplaceholder.typicode.com"
 
-// Host is the site this client talks to, and the host the URI driver in
-// domain.go claims. The scaffold points it at jsonplaceholder.com; change it once you
-// know the real endpoints you want to read.
-const Host = "jsonplaceholder.com"
+// DefaultUserAgent identifies the client to the API.
+const DefaultUserAgent = "jsonplaceholder-cli/0.1.0 (github.com/tamnd/jsonplaceholder-cli)"
 
-// BaseURL is the root every request is built from.
-const BaseURL = "https://" + Host
-
-// Client talks to jsonplaceholder over HTTP.
-type Client struct {
-	HTTP      *http.Client
+// Config holds constructor parameters for Client.
+type Config struct {
+	BaseURL   string
 	UserAgent string
-	// Rate is the minimum gap between requests. Zero means no pacing.
-	Rate    time.Duration
-	Retries int
-
-	last time.Time
+	Rate      time.Duration
+	Timeout   time.Duration
+	Retries   int
 }
 
-// NewClient returns a Client with sensible defaults: a 30s timeout, a 200ms
-// minimum gap between requests, and five retries on transient errors.
-func NewClient() *Client {
-	return &Client{
-		HTTP:      &http.Client{Timeout: 30 * time.Second},
+// DefaultConfig returns production defaults.
+func DefaultConfig() Config {
+	return Config{
+		BaseURL:   "https://" + Host,
 		UserAgent: DefaultUserAgent,
 		Rate:      200 * time.Millisecond,
-		Retries:   5,
+		Timeout:   30 * time.Second,
+		Retries:   3,
 	}
 }
 
-// Get fetches url and returns the response body. It paces and retries according
-// to the client's settings. The caller owns nothing extra; the body is read
-// fully and closed here.
-func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
+// Client is the JSONPlaceholder HTTP client.
+type Client struct {
+	cfg  Config
+	http *http.Client
+	mu   sync.Mutex
+	last time.Time
+}
+
+// NewClient constructs a Client from cfg.
+func NewClient(cfg Config) *Client {
+	return &Client{
+		cfg:  cfg,
+		http: &http.Client{Timeout: cfg.Timeout},
+	}
+}
+
+// Post is a JSONPlaceholder blog post.
+type Post struct {
+	ID     int    `json:"id"`
+	UserID int    `json:"userId"`
+	Title  string `json:"title"`
+	Body   string `json:"body"`
+}
+
+// Comment is a comment on a post.
+type Comment struct {
+	ID     int    `json:"id"`
+	PostID int    `json:"postId"`
+	Name   string `json:"name"`
+	Email  string `json:"email"`
+	Body   string `json:"body"`
+}
+
+// User is a JSONPlaceholder user with flattened address and company fields.
+type User struct {
+	ID       int    `json:"id"`
+	Name     string `json:"name"`
+	Username string `json:"username"`
+	Email    string `json:"email"`
+	Phone    string `json:"phone"`
+	Website  string `json:"website"`
+	City     string `json:"city"`    // from address.city
+	Company  string `json:"company"` // from company.name
+}
+
+// Todo is a task item.
+type Todo struct {
+	ID        int    `json:"id"`
+	UserID    int    `json:"userId"`
+	Title     string `json:"title"`
+	Completed bool   `json:"completed"`
+}
+
+// Album is a photo album.
+type Album struct {
+	ID     int    `json:"id"`
+	UserID int    `json:"userId"`
+	Title  string `json:"title"`
+}
+
+// Photo is a photo within an album.
+type Photo struct {
+	ID           int    `json:"id"`
+	AlbumID      int    `json:"albumId"`
+	Title        string `json:"title"`
+	URL          string `json:"url"`
+	ThumbnailURL string `json:"thumbnailUrl"`
+}
+
+// wireUser is the JSON shape from the API, with nested address and company.
+type wireUser struct {
+	ID       int    `json:"id"`
+	Name     string `json:"name"`
+	Username string `json:"username"`
+	Email    string `json:"email"`
+	Phone    string `json:"phone"`
+	Website  string `json:"website"`
+	Address  struct {
+		Street  string `json:"street"`
+		Suite   string `json:"suite"`
+		City    string `json:"city"`
+		Zipcode string `json:"zipcode"`
+	} `json:"address"`
+	Company struct {
+		Name string `json:"name"`
+	} `json:"company"`
+}
+
+func (w wireUser) toUser() User {
+	return User{
+		ID:       w.ID,
+		Name:     w.Name,
+		Username: w.Username,
+		Email:    w.Email,
+		Phone:    w.Phone,
+		Website:  w.Website,
+		City:     w.Address.City,
+		Company:  w.Company.Name,
+	}
+}
+
+// Posts returns a list of posts filtered by optional userId and limit.
+// Zero values are omitted from the query.
+func (c *Client) Posts(ctx context.Context, userID, limit int) ([]Post, error) {
+	params := map[string]string{}
+	if userID > 0 {
+		params["userId"] = strconv.Itoa(userID)
+	}
+	if limit > 0 {
+		params["_limit"] = strconv.Itoa(limit)
+	}
+	body, err := c.get(ctx, c.buildURL("/posts", params))
+	if err != nil {
+		return nil, err
+	}
+	var out []Post
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("parse posts: %w", err)
+	}
+	return out, nil
+}
+
+// Post returns a single post by id.
+func (c *Client) Post(ctx context.Context, id int) (Post, error) {
+	body, err := c.get(ctx, c.buildURL(fmt.Sprintf("/posts/%d", id), nil))
+	if err != nil {
+		return Post{}, err
+	}
+	var out Post
+	if err := json.Unmarshal(body, &out); err != nil {
+		return Post{}, fmt.Errorf("parse post: %w", err)
+	}
+	return out, nil
+}
+
+// Comments returns comments on a given post.
+func (c *Client) Comments(ctx context.Context, postID int) ([]Comment, error) {
+	body, err := c.get(ctx, c.buildURL(fmt.Sprintf("/posts/%d/comments", postID), nil))
+	if err != nil {
+		return nil, err
+	}
+	var out []Comment
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("parse comments: %w", err)
+	}
+	return out, nil
+}
+
+// Users returns all users.
+func (c *Client) Users(ctx context.Context) ([]User, error) {
+	body, err := c.get(ctx, c.buildURL("/users", nil))
+	if err != nil {
+		return nil, err
+	}
+	var wire []wireUser
+	if err := json.Unmarshal(body, &wire); err != nil {
+		return nil, fmt.Errorf("parse users: %w", err)
+	}
+	out := make([]User, len(wire))
+	for i, w := range wire {
+		out[i] = w.toUser()
+	}
+	return out, nil
+}
+
+// User returns a single user by id.
+func (c *Client) User(ctx context.Context, id int) (User, error) {
+	body, err := c.get(ctx, c.buildURL(fmt.Sprintf("/users/%d", id), nil))
+	if err != nil {
+		return User{}, err
+	}
+	var wire wireUser
+	if err := json.Unmarshal(body, &wire); err != nil {
+		return User{}, fmt.Errorf("parse user: %w", err)
+	}
+	return wire.toUser(), nil
+}
+
+// Todos returns todos filtered by optional userId, completed flag, and limit.
+// completedSet indicates whether the completed filter should be applied.
+func (c *Client) Todos(ctx context.Context, userID, limit int, completed, completedSet bool) ([]Todo, error) {
+	params := map[string]string{}
+	if userID > 0 {
+		params["userId"] = strconv.Itoa(userID)
+	}
+	if completedSet {
+		if completed {
+			params["completed"] = "true"
+		} else {
+			params["completed"] = "false"
+		}
+	}
+	if limit > 0 {
+		params["_limit"] = strconv.Itoa(limit)
+	}
+	body, err := c.get(ctx, c.buildURL("/todos", params))
+	if err != nil {
+		return nil, err
+	}
+	var out []Todo
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("parse todos: %w", err)
+	}
+	return out, nil
+}
+
+// Albums returns albums filtered by optional userId and limit.
+func (c *Client) Albums(ctx context.Context, userID, limit int) ([]Album, error) {
+	params := map[string]string{}
+	if userID > 0 {
+		params["userId"] = strconv.Itoa(userID)
+	}
+	if limit > 0 {
+		params["_limit"] = strconv.Itoa(limit)
+	}
+	body, err := c.get(ctx, c.buildURL("/albums", params))
+	if err != nil {
+		return nil, err
+	}
+	var out []Album
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("parse albums: %w", err)
+	}
+	return out, nil
+}
+
+// Photos returns photos filtered by optional albumId and limit.
+func (c *Client) Photos(ctx context.Context, albumID, limit int) ([]Photo, error) {
+	params := map[string]string{}
+	if albumID > 0 {
+		params["albumId"] = strconv.Itoa(albumID)
+	}
+	if limit > 0 {
+		params["_limit"] = strconv.Itoa(limit)
+	}
+	body, err := c.get(ctx, c.buildURL("/photos", params))
+	if err != nil {
+		return nil, err
+	}
+	var out []Photo
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("parse photos: %w", err)
+	}
+	return out, nil
+}
+
+// buildURL constructs a full API URL with query parameters.
+func (c *Client) buildURL(path string, params map[string]string) string {
+	base := strings.TrimRight(c.cfg.BaseURL, "/")
+	if len(params) == 0 {
+		return base + path
+	}
+	q := url.Values{}
+	for k, v := range params {
+		if v != "" {
+			q.Set(k, v)
+		}
+	}
+	return base + path + "?" + q.Encode()
+}
+
+// get fetches a URL with pacing and retries.
+func (c *Client) get(ctx context.Context, rawURL string) ([]byte, error) {
 	var lastErr error
-	for attempt := 0; attempt <= c.Retries; attempt++ {
+	for attempt := 0; attempt <= c.cfg.Retries; attempt++ {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
@@ -64,7 +317,7 @@ func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
 			case <-time.After(backoff(attempt)):
 			}
 		}
-		body, retry, err := c.do(ctx, url)
+		body, retry, err := c.do(ctx, rawURL)
 		if err == nil {
 			return body, nil
 		}
@@ -73,18 +326,18 @@ func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
 			return nil, err
 		}
 	}
-	return nil, fmt.Errorf("get %s: %w", url, lastErr)
+	return nil, fmt.Errorf("get %s: %w", rawURL, lastErr)
 }
 
-func (c *Client) do(ctx context.Context, url string) (body []byte, retry bool, err error) {
+func (c *Client) do(ctx context.Context, rawURL string) (body []byte, retry bool, err error) {
 	c.pace()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, false, err
 	}
-	req.Header.Set("User-Agent", c.UserAgent)
+	req.Header.Set("User-Agent", c.cfg.UserAgent)
 
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, true, err
 	}
@@ -104,12 +357,13 @@ func (c *Client) do(ctx context.Context, url string) (body []byte, retry bool, e
 	return b, false, nil
 }
 
-// pace blocks until at least Rate has passed since the previous request.
 func (c *Client) pace() {
-	if c.Rate <= 0 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cfg.Rate <= 0 {
 		return
 	}
-	if wait := c.Rate - time.Since(c.last); wait > 0 {
+	if wait := c.cfg.Rate - time.Since(c.last); wait > 0 {
 		time.Sleep(wait)
 	}
 	c.last = time.Now()
@@ -121,80 +375,4 @@ func backoff(attempt int) time.Duration {
 		d = 5 * time.Second
 	}
 	return d
-}
-
-// Page is the scaffold's one example record: a single page, addressed by the
-// path that names it on jsonplaceholder.com. It is a stand-in for the typed records you
-// will model from the real jsonplaceholder endpoints. The kit struct tags make it
-// addressable as a resource URI (see domain.go): ID is the URI id, and Body is
-// the long text `jsonplaceholder cat` and the Markdown export print.
-type Page struct {
-	ID    string `json:"id" kit:"id"`
-	URL   string `json:"url"`
-	Title string `json:"title,omitempty"`
-	Body  string `json:"body,omitempty" kit:"body"`
-}
-
-// GetPage fetches one page by its path (for example "wiki/Go") and returns it as
-// a record. The scaffold keeps a plain-text preview of the response as the body;
-// replace the parsing with the real fields once you know the endpoint's shape.
-func (c *Client) GetPage(ctx context.Context, path string) (*Page, error) {
-	path = strings.Trim(path, "/")
-	url := BaseURL + "/" + path
-	body, err := c.Get(ctx, url)
-	if err != nil {
-		return nil, err
-	}
-	return &Page{ID: path, URL: url, Title: path, Body: pageText(body)}, nil
-}
-
-// PageLinks fetches a page and returns the same-host pages it links to, as page
-// stubs. It shows the member-listing pattern the URI driver relies on: every
-// stub carries enough (an id and a URL) to be addressed and followed on its own.
-func (c *Client) PageLinks(ctx context.Context, path string, limit int) ([]*Page, error) {
-	path = strings.Trim(path, "/")
-	body, err := c.Get(ctx, BaseURL+"/"+path)
-	if err != nil {
-		return nil, err
-	}
-	var out []*Page
-	seen := map[string]bool{}
-	for _, p := range linkPaths(body) {
-		if seen[p] {
-			continue
-		}
-		seen[p] = true
-		out = append(out, &Page{ID: p, URL: BaseURL + "/" + p})
-		if limit > 0 && len(out) >= limit {
-			break
-		}
-	}
-	return out, nil
-}
-
-var (
-	hrefRE = regexp.MustCompile(`href="(/[^":#?]+)"`)
-	tagRE  = regexp.MustCompile(`<[^>]+>`)
-)
-
-// linkPaths pulls the relative link targets out of an HTML response, so a list
-// op can turn each into an addressable page stub.
-func linkPaths(body []byte) []string {
-	var out []string
-	for _, m := range hrefRE.FindAllSubmatch(body, -1) {
-		if p := strings.Trim(string(m[1]), "/"); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-// pageText reduces an HTML response to a short plain-text preview, a stand-in
-// for the typed extract a real endpoint would hand you.
-func pageText(body []byte) string {
-	s := strings.Join(strings.Fields(tagRE.ReplaceAllString(string(body), " ")), " ")
-	if len(s) > 500 {
-		s = s[:500]
-	}
-	return s
 }
