@@ -168,6 +168,89 @@ func TestLimitParam(t *testing.T) {
 	}
 }
 
+func TestParseComments(t *testing.T) {
+	comments := []map[string]any{
+		{"id": 1, "postId": 1, "name": "first comment", "email": "a@b.com", "body": "hello"},
+	}
+	b, _ := json.Marshal(comments)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(b)
+	}))
+	defer ts.Close()
+
+	c := newTestClient(ts)
+	result, err := c.Comments(context.Background(), 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("got %d comments, want 1", len(result))
+	}
+	if result[0].PostID != 1 {
+		t.Errorf("comment[0].PostID = %d, want 1", result[0].PostID)
+	}
+	if result[0].Name != "first comment" {
+		t.Errorf("comment[0].Name = %q, want first comment", result[0].Name)
+	}
+}
+
+func TestPostIDParam(t *testing.T) {
+	var gotQuery string
+	comments := []map[string]any{{"id": 1, "postId": 1, "name": "n", "email": "e@e.com", "body": "b"}}
+	b, _ := json.Marshal(comments)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(b)
+	}))
+	defer ts.Close()
+
+	c := newTestClient(ts)
+	_, err := c.Comments(context.Background(), 3, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotQuery, "postId=3") {
+		t.Errorf("query %q does not contain postId=3", gotQuery)
+	}
+	if !strings.Contains(gotQuery, "_limit=5") {
+		t.Errorf("query %q does not contain _limit=5", gotQuery)
+	}
+}
+
+func TestSnakeCaseOutput(t *testing.T) {
+	posts := []map[string]any{
+		{"id": 7, "userId": 3, "title": "t", "body": "b"},
+	}
+	b, _ := json.Marshal(posts)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(b)
+	}))
+	defer ts.Close()
+
+	c := newTestClient(ts)
+	result, err := c.Posts(context.Background(), 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result[0].ID != 7 {
+		t.Errorf("post.ID = %d, want 7", result[0].ID)
+	}
+	if result[0].UserID != 3 {
+		t.Errorf("post.UserID = %d, want 3", result[0].UserID)
+	}
+	// verify JSON output uses snake_case
+	out, _ := json.Marshal(result[0])
+	if !strings.Contains(string(out), `"user_id"`) {
+		t.Errorf("JSON output %s does not contain user_id", out)
+	}
+	if strings.Contains(string(out), `"userId"`) {
+		t.Errorf("JSON output %s must not contain userId (camelCase)", out)
+	}
+}
+
 func TestRetry503(t *testing.T) {
 	var hits int
 	posts := []map[string]any{{"id": 1, "userId": 1, "title": "t", "body": "b"}}
