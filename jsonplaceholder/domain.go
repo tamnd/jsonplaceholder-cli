@@ -50,6 +50,12 @@ func (Domain) Register(app *kit.App) {
 
 	kit.Handle(app, kit.OpMeta{Name: "users", Group: "read", List: true,
 		Summary: "List users", URIType: "user"}, listUsers)
+
+	kit.Handle(app, kit.OpMeta{Name: "todos", Group: "read", List: true,
+		Summary: "List todos", URIType: "todo"}, listTodos)
+
+	kit.Handle(app, kit.OpMeta{Name: "comments", Group: "read", List: true,
+		Summary: "List comments", URIType: "comment"}, listComments)
 }
 
 // newClient builds the client from the host-resolved config.
@@ -73,6 +79,7 @@ func newClient(_ context.Context, cfg kit.Config) (any, error) {
 // --- inputs ---
 
 type postsRef struct {
+	UserID int     `kit:"flag,inherit" name:"user-id" help:"filter by user ID"`
 	Limit  int     `kit:"flag,inherit" help:"max results"`
 	Client *Client `kit:"inject"`
 }
@@ -81,10 +88,22 @@ type usersRef struct {
 	Client *Client `kit:"inject"`
 }
 
+type todosRef struct {
+	UserID int     `kit:"flag,inherit" name:"user-id" help:"filter by user ID"`
+	Limit  int     `kit:"flag,inherit" help:"max results"`
+	Client *Client `kit:"inject"`
+}
+
+type commentsRef struct {
+	PostID int     `kit:"flag,inherit" name:"post-id" help:"filter by post ID"`
+	Limit  int     `kit:"flag,inherit" help:"max results"`
+	Client *Client `kit:"inject"`
+}
+
 // --- handlers ---
 
 func listPosts(ctx context.Context, in postsRef, emit func(*Post) error) error {
-	posts, err := in.Client.Posts(ctx, 0, in.Limit)
+	posts, err := in.Client.Posts(ctx, in.UserID, in.Limit)
 	if err != nil {
 		return mapErr(err)
 	}
@@ -103,6 +122,32 @@ func listUsers(ctx context.Context, in usersRef, emit func(*User) error) error {
 	}
 	for i := range users {
 		if err := emit(&users[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func listTodos(ctx context.Context, in todosRef, emit func(*Todo) error) error {
+	todos, err := in.Client.Todos(ctx, in.UserID, in.Limit, false, false)
+	if err != nil {
+		return mapErr(err)
+	}
+	for i := range todos {
+		if err := emit(&todos[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func listComments(ctx context.Context, in commentsRef, emit func(*Comment) error) error {
+	comments, err := in.Client.Comments(ctx, in.PostID, in.Limit)
+	if err != nil {
+		return mapErr(err)
+	}
+	for i := range comments {
+		if err := emit(&comments[i]); err != nil {
 			return err
 		}
 	}

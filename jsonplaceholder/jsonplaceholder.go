@@ -63,16 +63,16 @@ func NewClient(cfg Config) *Client {
 
 // Post is a JSONPlaceholder blog post.
 type Post struct {
-	ID     int    `json:"id"`
-	UserID int    `json:"userId"`
+	ID     int    `json:"id"      kit:"id"`
+	UserID int    `json:"user_id"`
 	Title  string `json:"title"`
 	Body   string `json:"body"`
 }
 
 // Comment is a comment on a post.
 type Comment struct {
-	ID     int    `json:"id"`
-	PostID int    `json:"postId"`
+	ID     int    `json:"id"      kit:"id"`
+	PostID int    `json:"post_id"`
 	Name   string `json:"name"`
 	Email  string `json:"email"`
 	Body   string `json:"body"`
@@ -80,7 +80,7 @@ type Comment struct {
 
 // User is a JSONPlaceholder user with flattened address and company fields.
 type User struct {
-	ID       int    `json:"id"`
+	ID       int    `json:"id"       kit:"id"`
 	Name     string `json:"name"`
 	Username string `json:"username"`
 	Email    string `json:"email"`
@@ -92,26 +92,87 @@ type User struct {
 
 // Todo is a task item.
 type Todo struct {
-	ID        int    `json:"id"`
-	UserID    int    `json:"userId"`
+	ID        int    `json:"id"         kit:"id"`
+	UserID    int    `json:"user_id"`
 	Title     string `json:"title"`
 	Completed bool   `json:"completed"`
 }
 
 // Album is a photo album.
 type Album struct {
-	ID     int    `json:"id"`
-	UserID int    `json:"userId"`
+	ID     int    `json:"id"      kit:"id"`
+	UserID int    `json:"user_id"`
 	Title  string `json:"title"`
 }
 
 // Photo is a photo within an album.
 type Photo struct {
+	ID           int    `json:"id"            kit:"id"`
+	AlbumID      int    `json:"album_id"`
+	Title        string `json:"title"`
+	URL          string `json:"url"`
+	ThumbnailURL string `json:"thumbnail_url"`
+}
+
+// wirePost is the JSON shape from the API (camelCase keys).
+type wirePost struct {
+	ID     int    `json:"id"`
+	UserID int    `json:"userId"`
+	Title  string `json:"title"`
+	Body   string `json:"body"`
+}
+
+func (w wirePost) toPost() Post {
+	return Post{ID: w.ID, UserID: w.UserID, Title: w.Title, Body: w.Body}
+}
+
+// wireTodo is the JSON shape from the API (camelCase keys).
+type wireTodo struct {
+	ID        int    `json:"id"`
+	UserID    int    `json:"userId"`
+	Title     string `json:"title"`
+	Completed bool   `json:"completed"`
+}
+
+func (w wireTodo) toTodo() Todo {
+	return Todo{ID: w.ID, UserID: w.UserID, Title: w.Title, Completed: w.Completed}
+}
+
+// wireComment is the JSON shape from the API (camelCase keys).
+type wireComment struct {
+	ID     int    `json:"id"`
+	PostID int    `json:"postId"`
+	Name   string `json:"name"`
+	Email  string `json:"email"`
+	Body   string `json:"body"`
+}
+
+func (w wireComment) toComment() Comment {
+	return Comment{ID: w.ID, PostID: w.PostID, Name: w.Name, Email: w.Email, Body: w.Body}
+}
+
+// wireAlbum is the JSON shape from the API (camelCase keys).
+type wireAlbum struct {
+	ID     int    `json:"id"`
+	UserID int    `json:"userId"`
+	Title  string `json:"title"`
+}
+
+func (w wireAlbum) toAlbum() Album {
+	return Album{ID: w.ID, UserID: w.UserID, Title: w.Title}
+}
+
+// wirePhoto is the JSON shape from the API (camelCase keys).
+type wirePhoto struct {
 	ID           int    `json:"id"`
 	AlbumID      int    `json:"albumId"`
 	Title        string `json:"title"`
 	URL          string `json:"url"`
 	ThumbnailURL string `json:"thumbnailUrl"`
+}
+
+func (w wirePhoto) toPhoto() Photo {
+	return Photo{ID: w.ID, AlbumID: w.AlbumID, Title: w.Title, URL: w.URL, ThumbnailURL: w.ThumbnailURL}
 }
 
 // wireUser is the JSON shape from the API, with nested address and company.
@@ -160,35 +221,50 @@ func (c *Client) Posts(ctx context.Context, userID, limit int) ([]Post, error) {
 	if err != nil {
 		return nil, err
 	}
-	var out []Post
-	if err := json.Unmarshal(body, &out); err != nil {
+	var wire []wirePost
+	if err := json.Unmarshal(body, &wire); err != nil {
 		return nil, fmt.Errorf("parse posts: %w", err)
+	}
+	out := make([]Post, len(wire))
+	for i, w := range wire {
+		out[i] = w.toPost()
 	}
 	return out, nil
 }
 
-// Post returns a single post by id.
-func (c *Client) Post(ctx context.Context, id int) (Post, error) {
+// GetPost returns a single post by id.
+func (c *Client) GetPost(ctx context.Context, id int) (Post, error) {
 	body, err := c.get(ctx, c.buildURL(fmt.Sprintf("/posts/%d", id), nil))
 	if err != nil {
 		return Post{}, err
 	}
-	var out Post
-	if err := json.Unmarshal(body, &out); err != nil {
+	var wire wirePost
+	if err := json.Unmarshal(body, &wire); err != nil {
 		return Post{}, fmt.Errorf("parse post: %w", err)
 	}
-	return out, nil
+	return wire.toPost(), nil
 }
 
-// Comments returns comments on a given post.
-func (c *Client) Comments(ctx context.Context, postID int) ([]Comment, error) {
-	body, err := c.get(ctx, c.buildURL(fmt.Sprintf("/posts/%d/comments", postID), nil))
+// Comments returns comments filtered by optional postId and limit.
+func (c *Client) Comments(ctx context.Context, postID, limit int) ([]Comment, error) {
+	params := map[string]string{}
+	if postID > 0 {
+		params["postId"] = strconv.Itoa(postID)
+	}
+	if limit > 0 {
+		params["_limit"] = strconv.Itoa(limit)
+	}
+	body, err := c.get(ctx, c.buildURL("/comments", params))
 	if err != nil {
 		return nil, err
 	}
-	var out []Comment
-	if err := json.Unmarshal(body, &out); err != nil {
+	var wire []wireComment
+	if err := json.Unmarshal(body, &wire); err != nil {
 		return nil, fmt.Errorf("parse comments: %w", err)
+	}
+	out := make([]Comment, len(wire))
+	for i, w := range wire {
+		out[i] = w.toComment()
 	}
 	return out, nil
 }
@@ -244,9 +320,13 @@ func (c *Client) Todos(ctx context.Context, userID, limit int, completed, comple
 	if err != nil {
 		return nil, err
 	}
-	var out []Todo
-	if err := json.Unmarshal(body, &out); err != nil {
+	var wire []wireTodo
+	if err := json.Unmarshal(body, &wire); err != nil {
 		return nil, fmt.Errorf("parse todos: %w", err)
+	}
+	out := make([]Todo, len(wire))
+	for i, w := range wire {
+		out[i] = w.toTodo()
 	}
 	return out, nil
 }
@@ -264,9 +344,13 @@ func (c *Client) Albums(ctx context.Context, userID, limit int) ([]Album, error)
 	if err != nil {
 		return nil, err
 	}
-	var out []Album
-	if err := json.Unmarshal(body, &out); err != nil {
+	var wire []wireAlbum
+	if err := json.Unmarshal(body, &wire); err != nil {
 		return nil, fmt.Errorf("parse albums: %w", err)
+	}
+	out := make([]Album, len(wire))
+	for i, w := range wire {
+		out[i] = w.toAlbum()
 	}
 	return out, nil
 }
@@ -284,9 +368,13 @@ func (c *Client) Photos(ctx context.Context, albumID, limit int) ([]Photo, error
 	if err != nil {
 		return nil, err
 	}
-	var out []Photo
-	if err := json.Unmarshal(body, &out); err != nil {
+	var wire []wirePhoto
+	if err := json.Unmarshal(body, &wire); err != nil {
 		return nil, fmt.Errorf("parse photos: %w", err)
+	}
+	out := make([]Photo, len(wire))
+	for i, w := range wire {
+		out[i] = w.toPhoto()
 	}
 	return out, nil
 }
